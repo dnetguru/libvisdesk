@@ -90,7 +90,7 @@ int main() {
     }
 
     // Watch with callback and 500ms throttle
-    libvisdesk_watch_visible_area(handle, callback, nullptr, 500);
+    libvisdesk_watch_visible_area(handle, callback, 500, nullptr);
 
     // Wait, then stop
     std::cin.get();
