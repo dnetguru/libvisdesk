@@ -1,6 +1,6 @@
 # libvisdesk
 
-A Rust library for detecting the visible (unoccluded) desktop area on Windows monitors, accounting for windows and taskbars. It supports per-monitor statistics, real-time watching for changes via callbacks, and throttling to limit computation frequency. The library can be used natively in Rust or from C/C++ via FFI bindings.
+A Rust library for detecting the visible (unoccluded) desktop area on Windows monitors, accounting for cloaked windows and taskbars. It supports per-monitor statistics, real-time watching for changes via callbacks, and throttling to limit computation frequency. The library can be used natively in Rust or from C/C++ via FFI bindings.
 
 ## Features
 
