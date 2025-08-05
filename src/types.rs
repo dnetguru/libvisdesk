@@ -1,11 +1,27 @@
 use std::collections::HashSet;
-use std::sync::{Arc, Condvar};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::RECT;
 use moka::sync::Cache;
+use tokio::runtime::Runtime;
+use tokio::task::JoinHandle as TokioJoinHandle;
+use tokio::sync::mpsc::{Sender, Receiver};
 
 use crate::win::{MonitorInfo, WindowInfo, SendableWinEventHook};
+
+/// Messages that can be sent through the tokio channel
+#[derive(Debug)]
+pub(crate) enum VisibilityMessage {
+    /// A window has changed (created, destroyed, moved, etc.)
+    WindowChanged(isize),
+    /// The display configuration has changed
+    DisplayChanged,
+    /// Request to compute the visible area
+    ComputeNow,
+    /// Request to stop the watcher
+    Shutdown,
+}
 
 #[repr(C)]
 #[derive(Debug)]
@@ -27,7 +43,15 @@ pub struct ThreadLocalState {
     pub(crate) last_computation: Option<Instant>,
     pub(crate) pending_timer: bool,
     pub(crate) throttle_duration: Duration,
-    pub(crate) cancel_timer: Option<Arc<Condvar>>,
+    pub(crate) tokio_timer_handle: Option<TokioJoinHandle<()>>,
+    // Tokio runtime for async operations
+    pub(crate) tokio_runtime: Option<Arc<Runtime>>,
+    // Channel for sending messages to the tokio task
+    pub(crate) message_sender: Option<Sender<VisibilityMessage>>,
+    // Channel for receiving messages in the tokio task
+    pub(crate) message_receiver: Option<Receiver<VisibilityMessage>>,
+    // Main tokio task handle
+    pub(crate) main_task_handle: Option<TokioJoinHandle<()>>,
     // Cache for windows to avoid re-querying information
     pub(crate) window_cache: Cache<isize, WindowInfo>,
     // Set of windows that have changed since last computation
