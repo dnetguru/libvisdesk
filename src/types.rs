@@ -2,13 +2,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::RECT;
-use moka::sync::Cache;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle as TokioJoinHandle;
-use tokio::sync::mpsc::{Sender, Receiver};
+use windows::Win32::Foundation::RECT;
 
-use crate::win::{MonitorInfo, WindowInfo, SendableWinEventHook};
+use crate::win::SendableWinEventHook;
 
 /// Messages that can be sent through the tokio channel
 #[derive(Debug)]
@@ -17,8 +16,6 @@ pub(crate) enum VisibilityMessage {
     WindowChanged(isize),
     /// The display configuration has changed
     DisplayChanged,
-    /// Request to compute the visible area
-    ComputeNow,
     /// Request to stop the watcher
     Shutdown,
 }
@@ -48,18 +45,10 @@ pub struct ThreadLocalState {
     pub(crate) tokio_runtime: Option<Arc<Runtime>>,
     // Channel for sending messages to the tokio task
     pub(crate) message_sender: Option<Sender<VisibilityMessage>>,
-    // Channel for receiving messages in the tokio task
-    pub(crate) message_receiver: Option<Receiver<VisibilityMessage>>,
     // Main tokio task handle
     pub(crate) main_task_handle: Option<TokioJoinHandle<()>>,
-    // Cache for windows to avoid re-querying information
-    pub(crate) window_cache: Cache<isize, WindowInfo>,
     // Set of windows that have changed since last computation
     pub(crate) changed_windows: HashSet<isize>,
-    // Cached monitor information
-    pub(crate) monitor_cache: Cache<i64, MonitorInfo>,
-    // Force monitor refresh flag
-    pub(crate) force_monitor_refresh: bool,
     // Reusable buffers to reduce allocations
     pub(crate) windows_buffer: Vec<(RECT, String, String)>,
     pub(crate) region_buffer: Vec<u8>,

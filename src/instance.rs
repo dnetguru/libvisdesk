@@ -15,11 +15,8 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
-use tokio::time;
 
 use crate::types::VisibilityMessage;
-
-use moka::sync::Cache;
 
 use env_logger::{Builder, Target};
 use log::{debug, error, info, trace, warn, LevelFilter};
@@ -88,20 +85,8 @@ impl LibVisInstance {
             tokio_timer_handle: None,
             tokio_runtime: None,
             message_sender: None,
-            message_receiver: None,
             main_task_handle: None,
-
-            // Initialize window cache with size limit (1000 windows) and time-based expiration (1 hour)
-            window_cache: Cache::builder()
-                .max_capacity(1000)
-                .time_to_idle(Duration::from_secs(3600))
-                .build(),
             changed_windows: Default::default(),
-            // Initialize monitor cache with time-based expiration (30 seconds)
-            monitor_cache: Cache::builder()
-                .time_to_live(Duration::from_secs(30))
-                .build(),
-            force_monitor_refresh: false,
             windows_buffer: Vec::with_capacity(100), // Pre-allocate for ~100 windows
             region_buffer: Vec::with_capacity(4096), // Pre-allocate 4KB for region data
         };
@@ -131,19 +116,8 @@ impl LibVisInstance {
             tokio_timer_handle: None,
             tokio_runtime: None,
             message_sender: None,
-            message_receiver: None,
             main_task_handle: None,
-            // Initialize window cache with size limit (1000 windows) and time-based expiration (1 hour)
-            window_cache: Cache::builder()
-                .max_capacity(1000)
-                .time_to_idle(Duration::from_secs(3600))
-                .build(),
             changed_windows: Default::default(),
-            // Initialize monitor cache with time-based expiration (30 seconds)
-            monitor_cache: Cache::builder()
-                .time_to_live(Duration::from_secs(30))
-                .build(),
-            force_monitor_refresh: false,
             windows_buffer: Vec::with_capacity(100),
             region_buffer: Vec::with_capacity(4096),
         };
@@ -252,16 +226,13 @@ impl LibVisInstance {
 
                     // Get a clone of the sender if available
                     let sender_clone = {
-                        let mut state = thread_arc.lock().unwrap();
-                        state.force_monitor_refresh = true;
+                        let state = thread_arc.lock().unwrap();
                         state.message_sender.clone()
                     };
 
                     // Send a message to the tokio task
-                    if let Some(sender) = sender_clone {
-                        if let Err(e) = sender.try_send(VisibilityMessage::DisplayChanged) {
-                            warn!("Failed to send DisplayChanged message: {:?}", e);
-                        }
+                    if let Some(sender) = sender_clone && let Err(e) = sender.try_send(VisibilityMessage::DisplayChanged) {
+                        warn!("Failed to send DisplayChanged message: {:?}", e);
                     }
                 } else {
                     trace!("Received other message: {}", msg.message);
@@ -285,10 +256,8 @@ impl LibVisInstance {
                 }
 
                 // Send shutdown message to the tokio task
-                if let Some(sender) = &state.message_sender {
-                    if let Err(e) = sender.try_send(VisibilityMessage::Shutdown) {
-                        warn!("Failed to send Shutdown message: {:?}", e);
-                    }
+                if let Some(sender) = &state.message_sender && let Err(e) = sender.try_send(VisibilityMessage::Shutdown) {
+                    warn!("Failed to send Shutdown message: {:?}", e);
                 }
             }
 
@@ -306,11 +275,11 @@ impl LibVisInstance {
         true
     }
 
-    // Process messages in the tokio task
     async fn process_messages(arc: Arc<Mutex<ThreadLocalState>>, mut rx: Receiver<VisibilityMessage>) {
         debug!("Started tokio message processing task");
 
-        let mut throttle_timer: Option<time::Interval> = None;
+        // Track when the next computation is allowed
+        let mut next_computation_time: Option<Instant> = None;
 
         while let Some(msg) = rx.recv().await {
             match msg {
@@ -319,25 +288,17 @@ impl LibVisInstance {
                     {
                         let mut state = arc.lock().unwrap();
                         state.changed_windows.insert(hwnd);
-                    } // Drop the MutexGuard before await
+                    }
 
-                    // Schedule a computation with throttling
-                    Self::schedule_throttled_computation(&arc, &mut throttle_timer).await;
+                    Self::handle_computation_request(&arc, &mut next_computation_time).await;
                 },
                 VisibilityMessage::DisplayChanged => {
                     debug!("Received DisplayChanged message");
                     {
-                        let mut state = arc.lock().unwrap();
-                        state.force_monitor_refresh = true;
-                    } // Drop the MutexGuard before await
+                        // TODO: Invalidate monitor cache
+                    }
 
-                    // Schedule a computation with throttling
-                    Self::schedule_throttled_computation(&arc, &mut throttle_timer).await;
-                },
-                VisibilityMessage::ComputeNow => {
-                    trace!("Received ComputeNow message");
-                    // Perform computation immediately
-                    perform_computation_async(&arc).await;
+                    Self::handle_computation_request(&arc, &mut next_computation_time).await;
                 },
                 VisibilityMessage::Shutdown => {
                     debug!("Received Shutdown message, exiting tokio task");
@@ -349,60 +310,71 @@ impl LibVisInstance {
         debug!("Tokio message processing task exiting");
     }
 
-    // Schedule a throttled computation
-    async fn schedule_throttled_computation(
-        arc: &Arc<Mutex<ThreadLocalState>>, 
-        throttle_timer: &mut Option<time::Interval>
+    async fn handle_computation_request(
+        arc: &Arc<Mutex<ThreadLocalState>>,
+        next_computation_time: &mut Option<Instant>
     ) {
         let now = Instant::now();
 
-        // Use a block to ensure the MutexGuard is dropped before any await points
-        let should_compute = {
-            let mut state = arc.lock().unwrap();
+        // Check if a computation is already pending or if we're within the throttle period
+        let (should_compute_now, should_schedule, throttle_duration) = {
+            let state = arc.lock().unwrap();
 
-            match state.last_computation {
-                Some(last) if now - last < state.throttle_duration => {
-                    // If we're within the throttle duration, don't compute now
-                    if !state.pending_timer {
-                        state.pending_timer = true;
-
-                        // Create a new interval timer if we don't have one
-                        if throttle_timer.is_none() {
-                            let elapsed = now - last;
-                            let remaining = state.throttle_duration - elapsed;
-                            let mut interval = time::interval(remaining);
-                            interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-                            *throttle_timer = Some(interval);
-                        }
-                    }
-                    false
-                }
-                _ => true,
+            // If a timer is already pending, don't do anything
+            if state.pending_timer {
+                (false, false, state.throttle_duration)
+            } else if next_computation_time.is_none() || next_computation_time.map_or(false, |time| now >= time) {
+                // No computation has happened yet, or we're past the throttle time
+                // Perform computation immediately
+                (true, false, state.throttle_duration)
+            } else {
+                // We're within the throttle period, schedule a future computation
+                (false, true, state.throttle_duration)
             }
-        }; // MutexGuard is dropped here
+        };
 
-        if should_compute {
+        if should_compute_now {
             // Perform computation immediately
             perform_computation_async(arc).await;
 
-            // Update state after computation
-            let mut state = arc.lock().unwrap();
-            state.last_computation = Some(Instant::now());
-            state.pending_timer = false;
-            *throttle_timer = None;
-        } else if let Some(interval) = throttle_timer {
-            // Wait for the next tick of the interval
-            interval.tick().await;
-
-            // Perform computation after throttle period
-            perform_computation_async(arc).await;
+            // Update next allowed computation time
+            *next_computation_time = Some(now + throttle_duration);
 
             // Update state after computation
             let mut state = arc.lock().unwrap();
-            state.last_computation = Some(Instant::now());
-            state.pending_timer = false;
-            *throttle_timer = None;
+            state.last_computation = Some(now);
+        } else if should_schedule {
+            // Get the time for the next computation
+            let time = next_computation_time.unwrap();
+            let wait_duration = time - now;
+            let arc_clone = arc.clone();
+
+            // Update state to indicate a pending timer
+            {
+                let mut state = arc.lock().unwrap();
+                state.pending_timer = true;
+            }
+
+            // Spawn a task that will wait and then perform the computation
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep(wait_duration).await;
+                perform_computation_async(&arc_clone).await;
+
+                // Update state after computation
+                let now = Instant::now();
+                let mut state = arc_clone.lock().unwrap();
+                state.last_computation = Some(now);
+                state.pending_timer = false;
+            });
+
+            // Store the handle in the state
+            {
+                let mut state = arc.lock().unwrap();
+                state.tokio_timer_handle = Some(handle);
+            }
         }
+        // If neither should_compute_now nor should_schedule is true,
+        // do nothing as a computation is already pending or scheduled
     }
 
     pub fn stop_watch_visible_area(&mut self) -> bool {
@@ -517,17 +489,6 @@ async fn perform_computation_async(arc: &Arc<Mutex<ThreadLocalState>>) {
     } else {
         warn!("No callback set for computation");
     }
-}
-
-// Synchronous wrapper for perform_computation_async
-fn perform_computation(arc: &Arc<Mutex<ThreadLocalState>>) {
-    debug!("Performing visible area computation (sync wrapper)");
-
-    // Create a tokio runtime for the computation
-    let rt = LibVisInstance::create_runtime();
-
-    // Block on the async computation
-    rt.block_on(perform_computation_async(arc));
 }
 
 impl Default for LibVisInstance {

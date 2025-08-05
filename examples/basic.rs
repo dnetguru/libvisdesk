@@ -24,7 +24,7 @@ fn main() {
         }
     };
 
-    if state.watch_visible_area(callback, 500, ptr::null_mut()) {
+    if state.watch_visible_area(callback, 1000, ptr::null_mut()) {
         println!("Started watching visible area. Make some window changes to trigger the callback.");
     } else {
         println!("Failed to start watching.");

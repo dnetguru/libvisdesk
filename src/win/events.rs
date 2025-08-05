@@ -51,25 +51,27 @@ pub(crate) extern "system" fn win_event_proc(
                 // Track the changed window
                 state.changed_windows.insert(hwnd_val);
 
-                // If it's a destroy event, remove from cache
-                if event == EVENT_OBJECT_DESTROY {
-                    state.window_cache.invalidate(&hwnd_val);
-                }
+                // Only send a message if no computation is already pending
+                if !state.pending_timer {
+                    // Get a clone of the sender if available
+                    let sender_clone = state.message_sender.clone();
 
-                // Get a clone of the sender if available
-                let sender_clone = state.message_sender.clone();
+                    // Drop the lock before sending the message
+                    drop(state);
 
-                // Drop the lock before sending the message
-                drop(state);
-
-                // Send the message if we have a sender
-                if let Some(sender) = sender_clone {
-                    trace!("Sending WindowChanged message through tokio channel");
-                    if let Err(e) = sender.try_send(VisibilityMessage::WindowChanged(hwnd_val)) {
-                        warn!("Failed to send WindowChanged message: {:?}", e);
+                    // Send the message if we have a sender
+                    if let Some(sender) = sender_clone {
+                        trace!("Sending WindowChanged message through tokio channel");
+                        if let Err(e) = sender.try_send(VisibilityMessage::WindowChanged(hwnd_val)) {
+                            warn!("Failed to send WindowChanged message: {:?}", e);
+                        }
+                    } else {
+                        warn!("No message_sender available");
                     }
                 } else {
-                    warn!("No message_sender available");
+                    // Already pending, no need to send a message
+                    trace!("Skipping WindowChanged message - computation already pending");
+                    drop(state);
                 }
             } else {
                 warn!("No STATE arc available for posting message");
