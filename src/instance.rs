@@ -20,15 +20,15 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::System::Threading::*;
 
-use crate::types::{Callback, Inner, MonitorVisibleInfo, SendablePtr, SendableWinEventHook};
+use crate::types::{Callback, ThreadLocalState, MonitorVisibleInfo, SendablePtr};
 use crate::visibility::calculate_visible_desktop_area;
-use crate::win::win_event_proc;
+use crate::win::{win_event_proc, SendableWinEventHook};
 
-pub struct LibVisInstance(Arc<Mutex<Inner>>);
+pub struct LibVisInstance(Arc<Mutex<ThreadLocalState>>);
 
 // Thread-local storage for the instance state
 thread_local! {
-    pub(crate) static STATE: RefCell<Option<Arc<Mutex<Inner>>>> = const { RefCell::new(None) };
+    pub(crate) static STATE: RefCell<Option<Arc<Mutex<ThreadLocalState >>>> = const { RefCell::new(None) };
 }
 
 // Custom message for triggering recalculation
@@ -61,7 +61,7 @@ impl LibVisInstance {
             }
         }
 
-        let inner = Inner {
+        let state = ThreadLocalState {
             hook: None,
             thread: None,
             thread_id: None,
@@ -81,7 +81,7 @@ impl LibVisInstance {
 
         info!("Created new LibVisInstance");
 
-        Self(Arc::new(Mutex::new(inner)))
+        Self(Arc::new(Mutex::new(state)))
     }
 
     pub fn deinit(&mut self) {
@@ -91,8 +91,8 @@ impl LibVisInstance {
     pub fn get_visible_area(&self) -> (Vec<MonitorVisibleInfo>, i64, i64) {
         debug!("Starting visible area calculation");
 
-        // Create temporary Inner struct
-        let mut temp_inner = Inner {
+        // Create temporary state struct
+        let mut temp_state = ThreadLocalState {
             hook: None,
             thread: None,
             thread_id: None,
@@ -109,19 +109,18 @@ impl LibVisInstance {
             region_buffer: Vec::with_capacity(4096),
         };
 
-        // Call the function with the temporary inner struct
-        let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area(&mut temp_inner);
+        let result = calculate_visible_desktop_area(&mut temp_state);
 
-        let monitors_vec: Vec<MonitorVisibleInfo> = per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
+        let monitors_vec: Vec<MonitorVisibleInfo> = result.per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
             monitor_id: id,
             current_visible: cur,
             max_visible: maxv,
             total_area: tot,
         }).collect();
 
-        debug!("Visible area calculation complete. Total visible: {}, Total area: {}", total_visible, total_area);
+        debug!("Visible area calculation complete. Total visible: {}, Total area: {}", result.total_visible, result.total_area);
 
-        (monitors_vec, total_visible, total_area)
+        (monitors_vec, result.total_visible, result.total_area)
     }
 
     pub fn watch_visible_area(
@@ -136,14 +135,14 @@ impl LibVisInstance {
         let arc = self.0.clone();
 
         {
-            let mut inner = arc.lock().unwrap();
-            if inner.thread.is_some() {
+            let mut state = arc.lock().unwrap();
+            if state.thread.is_some() {
                 warn!("Watcher thread already running, cannot start new one");
                 return false;
             }
-            inner.callback = Some(callback);
-            inner.user_data = SendablePtr(user_data);
-            inner.throttle_duration = Duration::from_millis(throttle_ms);
+            state.callback = Some(callback);
+            state.user_data = SendablePtr(user_data);
+            state.throttle_duration = Duration::from_millis(throttle_ms);
         }
 
         let thread_arc = arc.clone();
@@ -156,8 +155,8 @@ impl LibVisInstance {
             let tid = unsafe { GetCurrentThreadId() };
 
             {
-                let mut inner = thread_arc.lock().unwrap();
-                inner.thread_id = Some(tid);
+                let mut state = thread_arc.lock().unwrap();
+                state.thread_id = Some(tid);
             }
 
             let hook = unsafe {
@@ -178,8 +177,8 @@ impl LibVisInstance {
             }
 
             {
-                let mut inner = thread_arc.lock().unwrap();
-                inner.hook = Some(SendableWinEventHook(hook));
+                let mut state = thread_arc.lock().unwrap();
+                state.hook = Some(SendableWinEventHook(hook));
             }
 
             debug!("WinEventHook set successfully");
@@ -195,19 +194,19 @@ impl LibVisInstance {
                 if msg.message == WM_RECOMPUTE {
                     trace!("Received WM_RECOMPUTE message");
                     let now = Instant::now();
-                    let mut inner = thread_arc.lock().unwrap();
-                    let should_compute = match inner.last_computation {
-                        Some(last) if now - last < inner.throttle_duration => {
-                            if !inner.pending_timer {
-                                inner.pending_timer = true;
+                    let mut state = thread_arc.lock().unwrap();
+                    let should_compute = match state.last_computation {
+                        Some(last) if now - last < state.throttle_duration => {
+                            if !state.pending_timer {
+                                state.pending_timer = true;
                                 let elapsed = now - last;
-                                let remaining = inner.throttle_duration - elapsed;
+                                let remaining = state.throttle_duration - elapsed;
 
                                 let mutex = Arc::new(Mutex::new(()));
                                 let condvar = Arc::new(Condvar::new());
-                                inner.cancel_timer = Some(condvar.clone());
+                                state.cancel_timer = Some(condvar.clone());
 
-                                let tid = inner.thread_id.unwrap();
+                                let tid = state.thread_id.unwrap();
                                 thread::spawn(move || {
                                     let guard = mutex.lock().unwrap();
                                     let result = condvar.wait_timeout(guard, remaining).unwrap();
@@ -227,17 +226,17 @@ impl LibVisInstance {
                         _ => true,
                     };
 
-                    drop(inner);
+                    drop(state);
 
                     if should_compute {
                         perform_computation(&thread_arc);
-                        let mut inner = thread_arc.lock().unwrap();
-                        inner.last_computation = Some(Instant::now());
-                        if inner.pending_timer {
-                            if let Some(cond) = inner.cancel_timer.take() {
+                        let mut state = thread_arc.lock().unwrap();
+                        state.last_computation = Some(Instant::now());
+                        if state.pending_timer {
+                            if let Some(cond) = state.cancel_timer.take() {
                                 cond.notify_one();
                             }
-                            inner.pending_timer = false;
+                            state.pending_timer = false;
                         }
                     }
                 } else {
@@ -250,8 +249,8 @@ impl LibVisInstance {
             }
 
             {
-                let inner = thread_arc.lock().unwrap();
-                if let Some(hook_wrapper) = &inner.hook {
+                let state = thread_arc.lock().unwrap();
+                if let Some(hook_wrapper) = &state.hook {
                     unsafe {
                         let unhook_res = UnhookWinEvent(hook_wrapper.0);
                         if !unhook_res.as_bool() {
@@ -262,14 +261,14 @@ impl LibVisInstance {
             }
 
             {
-                let mut inner = thread_arc.lock().unwrap();
-                if inner.pending_timer {
-                    if let Some(cond) = inner.cancel_timer.take() {
+                let mut state = thread_arc.lock().unwrap();
+                if state.pending_timer {
+                    if let Some(cond) = state.cancel_timer.take() {
                         cond.notify_one();
                     }
-                    inner.pending_timer = false;
+                    state.pending_timer = false;
                 }
-                inner.hook = None;
+                state.hook = None;
             }
 
             STATE.with(|s| {
@@ -279,8 +278,8 @@ impl LibVisInstance {
         });
 
         {
-            let mut inner = arc.lock().unwrap();
-            inner.thread = Some(th);
+            let mut state = arc.lock().unwrap();
+            state.thread = Some(th);
         }
 
         true
@@ -302,16 +301,16 @@ impl LibVisInstance {
         }
 
         let th_opt = {
-            let mut inner = arc.lock().unwrap();
-            if inner.pending_timer {
-                if let Some(cond) = inner.cancel_timer.take() {
+            let mut state = arc.lock().unwrap();
+            if state.pending_timer {
+                if let Some(cond) = state.cancel_timer.take() {
                     cond.notify_one();
                 }
-                inner.pending_timer = false;
+                state.pending_timer = false;
             }
-            inner.callback = None;
-            inner.user_data = SendablePtr(ptr::null_mut());
-            mem::take(&mut inner.thread)
+            state.callback = None;
+            state.user_data = SendablePtr(ptr::null_mut());
+            mem::take(&mut state.thread)
         };
 
         if let Some(th) = th_opt {
@@ -326,16 +325,16 @@ impl LibVisInstance {
     }
 }
 
-fn perform_computation(arc: &Arc<Mutex<Inner>>) {
+fn perform_computation(arc: &Arc<Mutex<ThreadLocalState>>) {
     debug!("Performing visible area computation");
 
-    // Get a mutable reference to the inner state
-    let mut inner = arc.lock().unwrap();
+    // Get a mutable reference to the state
+    let mut state = arc.lock().unwrap();
 
     // Calculate visible area with access to cached data
-    let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area(&mut inner);
+    let result = calculate_visible_desktop_area(&mut state);
 
-    let monitors_vec: Vec<MonitorVisibleInfo> = per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
+    let monitors_vec: Vec<MonitorVisibleInfo> = result.per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
         monitor_id: id,
         current_visible: cur,
         max_visible: maxv,
@@ -343,14 +342,14 @@ fn perform_computation(arc: &Arc<Mutex<Inner>>) {
     }).collect();
 
     debug!("Computation results: {:?}", monitors_vec);
-    debug!("Total visible: {}, Total area: {}", total_visible, total_area);
+    debug!("Total visible: {}, Total area: {}", result.total_visible, result.total_area);
 
     // Clear the changed windows set since we've processed them
-    inner.changed_windows.clear();
+    state.changed_windows.clear();
 
-    if let Some(cb) = &inner.callback {
+    if let Some(cb) = &state.callback {
         trace!("Calling user callback");
-        cb(&monitors_vec[..], total_visible, total_area, inner.user_data.0);
+        cb(&monitors_vec[..], result.total_visible, result.total_area, state.user_data.0);
     } else {
         warn!("No callback set for computation");
     }

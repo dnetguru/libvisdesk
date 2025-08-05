@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar};
-// types.rs
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::RECT;
-use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
+
+use crate::win::{MonitorInfo, WindowInfo, SendableWinEventHook};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -15,26 +15,9 @@ pub struct MonitorVisibleInfo {
     pub total_area: i64,
 }
 
-#[derive(Copy, Clone)]
-#[derive(Debug)]
-pub struct MonitorInfo {
-    pub(crate) handle: i64,
-    pub(crate) rect: RECT,
-    pub(crate) total_area: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct WindowInfo {
-    pub(crate) rect: RECT,
-    pub(crate) class_name: String,
-    pub(crate) process_name: String,
-    pub(crate) is_shell: bool,
-    pub(crate) last_updated: Instant,
-}
-
 pub type Callback = Box<dyn Fn(&[MonitorVisibleInfo], i64, i64, *mut std::ffi::c_void) + Send + 'static>;
 
-pub struct Inner {
+pub struct ThreadLocalState {
     pub(crate) hook: Option<SendableWinEventHook>,
     pub(crate) thread: Option<JoinHandle<()>>,
     pub(crate) thread_id: Option<u32>,
@@ -58,11 +41,5 @@ pub struct Inner {
 #[repr(transparent)]
 pub struct SendablePtr(pub *mut std::ffi::c_void);
 
-#[repr(transparent)]
-pub struct SendableWinEventHook(pub HWINEVENTHOOK);
-
 unsafe impl Send for SendablePtr {}
 unsafe impl Sync for SendablePtr {}
-
-unsafe impl Send for SendableWinEventHook {}
-unsafe impl Sync for SendableWinEventHook {}

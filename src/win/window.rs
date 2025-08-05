@@ -11,6 +11,16 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use std::mem;
+use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub(crate) rect: RECT,
+    pub(crate) class_name: String,
+    pub(crate) process_name: String,
+    pub(crate) is_shell: bool,
+    pub(crate) last_updated: Instant,
+}
 
 /// Windows enumeration callback.
 ///

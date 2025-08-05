@@ -7,7 +7,13 @@ use log::trace;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 
-use crate::types::MonitorInfo;
+#[derive(Copy, Clone)]
+#[derive(Debug)]
+pub struct MonitorInfo {
+    pub(crate) handle: i64,
+    pub(crate) rect: RECT,
+    pub(crate) total_area: i64,
+}
 
 /// Monitor enumeration callback.
 ///

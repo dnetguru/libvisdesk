@@ -10,6 +10,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::instance::{STATE, WM_RECOMPUTE};
 
+#[repr(transparent)]
+pub struct SendableWinEventHook(pub HWINEVENTHOOK);
+
+unsafe impl Send for SendableWinEventHook {}
+unsafe impl Sync for SendableWinEventHook {}
+
 /// Windows event procedure callback.
 ///
 /// This function is called by Windows when relevant window events occur.
@@ -35,18 +41,18 @@ pub(crate) extern "system" fn win_event_proc(
     if matches!(event, EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY | EVENT_OBJECT_SHOW | EVENT_OBJECT_HIDE | EVENT_OBJECT_REORDER | EVENT_OBJECT_LOCATIONCHANGE) {
         STATE.with(|s| {
             if let Some(arc) = s.borrow().as_ref() {
-                let mut inner = arc.lock().unwrap();
+                let mut state = arc.lock().unwrap();
 
                 // Track the changed window
                 let hwnd_val = hwnd.0 as isize;
-                inner.changed_windows.insert(hwnd_val);
+                state.changed_windows.insert(hwnd_val);
 
                 // If it's a destroy event, remove from cache
                 if event == EVENT_OBJECT_DESTROY {
-                    inner.window_cache.remove(&hwnd_val);
+                    state.window_cache.remove(&hwnd_val);
                 }
 
-                if let Some(tid) = inner.thread_id {
+                if let Some(tid) = state.thread_id {
                     unsafe {
                         let post_res = PostThreadMessageW(tid, WM_RECOMPUTE, WPARAM(0), LPARAM(0));
                         if post_res.is_err() {
