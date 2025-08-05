@@ -49,7 +49,7 @@ pub(crate) extern "system" fn win_event_proc(
 
                 // If it's a destroy event, remove from cache
                 if event == EVENT_OBJECT_DESTROY {
-                    state.window_cache.remove(&hwnd_val);
+                    state.window_cache.invalidate(&hwnd_val);
                 }
 
                 if let Some(tid) = state.thread_id {

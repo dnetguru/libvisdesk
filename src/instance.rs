@@ -12,6 +12,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use moka::sync::Cache;
+
 use env_logger::{Builder, Target};
 use log::{debug, error, info, trace, warn, LevelFilter};
 use windows::Win32::Foundation::*;
@@ -72,9 +74,17 @@ impl LibVisInstance {
             throttle_duration: Duration::from_millis(500),
             cancel_timer: None,
 
-            window_cache: Default::default(),
+            // Initialize window cache with size limit (1000 windows) and time-based expiration (1 hour)
+            window_cache: Cache::builder()
+                .max_capacity(1000)
+                .time_to_idle(Duration::from_secs(3600))
+                .build(),
             changed_windows: Default::default(),
-            monitor_cache: Vec::new(),
+            // Initialize monitor cache with time-based expiration (30 seconds)
+            monitor_cache: Cache::builder()
+                .time_to_live(Duration::from_secs(30))
+                .build(),
+            force_monitor_refresh: false,
             windows_buffer: Vec::with_capacity(100), // Pre-allocate for ~100 windows
             region_buffer: Vec::with_capacity(4096), // Pre-allocate 4KB for region data
         };
@@ -102,9 +112,17 @@ impl LibVisInstance {
             pending_timer: false,
             throttle_duration: Duration::from_millis(500),
             cancel_timer: None,
-            window_cache: Default::default(),
+            // Initialize window cache with size limit (1000 windows) and time-based expiration (1 hour)
+            window_cache: Cache::builder()
+                .max_capacity(1000)
+                .time_to_idle(Duration::from_secs(3600))
+                .build(),
             changed_windows: Default::default(),
-            monitor_cache: Vec::new(),
+            // Initialize monitor cache with time-based expiration (30 seconds)
+            monitor_cache: Cache::builder()
+                .time_to_live(Duration::from_secs(30))
+                .build(),
+            force_monitor_refresh: false,
             windows_buffer: Vec::with_capacity(100),
             region_buffer: Vec::with_capacity(4096),
         };
@@ -191,7 +209,20 @@ impl LibVisInstance {
                     break;
                 }
 
-                if msg.message == WM_RECOMPUTE {
+                if msg.message == WM_DISPLAYCHANGE {
+                    debug!("Display configuration changed, marking monitor cache for refresh");
+                    let mut state = thread_arc.lock().unwrap();
+                    state.force_monitor_refresh = true;
+                    drop(state);
+
+                    // Trigger a recomputation
+                    unsafe {
+                        let res = PostThreadMessageW(tid, WM_RECOMPUTE, WPARAM(0), LPARAM(0));
+                        if res.is_err() {
+                            warn!("PostThreadMessageW failed: {:?}", res);
+                        }
+                    }
+                } else if msg.message == WM_RECOMPUTE {
                     trace!("Received WM_RECOMPUTE message");
                     let now = Instant::now();
                     let mut state = thread_arc.lock().unwrap();

@@ -1,8 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Condvar};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::RECT;
+use moka::sync::Cache;
 
 use crate::win::{MonitorInfo, WindowInfo, SendableWinEventHook};
 
@@ -28,11 +29,13 @@ pub struct ThreadLocalState {
     pub(crate) throttle_duration: Duration,
     pub(crate) cancel_timer: Option<Arc<Condvar>>,
     // Cache for windows to avoid re-querying information
-    pub(crate) window_cache: HashMap<isize, WindowInfo>,
+    pub(crate) window_cache: Cache<isize, WindowInfo>,
     // Set of windows that have changed since last computation
     pub(crate) changed_windows: HashSet<isize>,
     // Cached monitor information
-    pub(crate) monitor_cache: Vec<MonitorInfo>,
+    pub(crate) monitor_cache: Cache<i64, MonitorInfo>,
+    // Force monitor refresh flag
+    pub(crate) force_monitor_refresh: bool,
     // Reusable buffers to reduce allocations
     pub(crate) windows_buffer: Vec<(RECT, String, String)>,
     pub(crate) region_buffer: Vec<u8>,
