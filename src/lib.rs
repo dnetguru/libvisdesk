@@ -7,6 +7,7 @@ use std::ptr;
 use std::thread;
 use std::fs::File;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,12 @@ impl LibVisInstance {
             pending_timer: false,
             throttle_duration: Duration::from_millis(500),
             cancel_timer: None,
+
+            window_cache: HashMap::new(),
+            changed_windows: HashSet::new(),
+            monitor_cache: Vec::new(),
+            windows_buffer: Vec::with_capacity(100), // Pre-allocate for ~100 windows
+            region_buffer: Vec::with_capacity(4096), // Pre-allocate 4KB for region data
         };
 
         info!("Created new LibVisInstance");
@@ -301,7 +308,12 @@ impl LibVisInstance {
 
 fn perform_computation(arc: &Arc<Mutex<Inner>>) {
     debug!("Performing visible area computation");
-    let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area();
+
+    // Get a mutable reference to the inner state
+    let mut inner = arc.lock().unwrap();
+
+    // Calculate visible area with access to cached data
+    let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area_optimized(&mut inner);
 
     let monitors_vec: Vec<MonitorVisibleInfo> = per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
         monitor_id: id,
@@ -313,7 +325,9 @@ fn perform_computation(arc: &Arc<Mutex<Inner>>) {
     debug!("Computation results: {:?}", monitors_vec);
     debug!("Total visible: {}, Total area: {}", total_visible, total_area);
 
-    let inner = arc.lock().unwrap();
+    // Clear the changed windows set since we've processed them
+    inner.changed_windows.clear();
+
     if let Some(cb) = &inner.callback {
         trace!("Calling user callback");
         cb(&monitors_vec[..], total_visible, total_area, inner.user_data.0);
@@ -350,7 +364,17 @@ extern "system" fn win_event_proc(
     if matches!(event, EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY | EVENT_OBJECT_SHOW | EVENT_OBJECT_HIDE | EVENT_OBJECT_REORDER | EVENT_OBJECT_LOCATIONCHANGE) {
         STATE.with(|s| {
             if let Some(arc) = s.borrow().as_ref() {
-                let inner = arc.lock().unwrap();
+                let mut inner = arc.lock().unwrap();
+
+                // Track the changed window
+                let hwnd_val = hwnd.0 as isize;
+                inner.changed_windows.insert(hwnd_val);
+
+                // If it's a destroy event, remove from cache
+                if event == EVENT_OBJECT_DESTROY {
+                    inner.window_cache.remove(&hwnd_val);
+                }
+
                 if let Some(tid) = inner.thread_id {
                     unsafe {
                         let post_res = PostThreadMessageW(tid, WM_RECOMPUTE, WPARAM(0), LPARAM(0));
@@ -368,37 +392,115 @@ extern "system" fn win_event_proc(
     }
 }
 
+// Original function kept for backward compatibility
 fn calculate_visible_desktop_area() -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
-    let mut monitors: Vec<MonitorInfo> = Vec::new();
-    unsafe {
-        let enum_res = EnumDisplayMonitors(None, None, Some(enum_monitors_collect), LPARAM(&mut monitors as *mut _ as isize));
-        if !enum_res.as_bool() {
-            warn!("EnumDisplayMonitors failed");
+    let mut inner = Inner {
+        hook: None,
+        thread: None,
+        thread_id: None,
+        callback: None,
+        user_data: SendablePtr(ptr::null_mut()),
+        last_computation: None,
+        pending_timer: false,
+        throttle_duration: Duration::from_millis(500),
+        cancel_timer: None,
+        window_cache: HashMap::new(),
+        changed_windows: HashSet::new(),
+        monitor_cache: Vec::new(),
+        windows_buffer: Vec::with_capacity(100),
+        region_buffer: Vec::with_capacity(4096),
+    };
+
+    calculate_visible_desktop_area_optimized(&mut inner)
+}
+
+// Optimized version that uses cached data
+fn calculate_visible_desktop_area_optimized(inner: &mut Inner) -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
+    // Check if we need to update monitor information
+    let need_monitor_update = inner.monitor_cache.is_empty();
+
+    if need_monitor_update {
+        // Clear and reuse the monitor cache
+        inner.monitor_cache.clear();
+
+        unsafe {
+            let enum_res = EnumDisplayMonitors(
+                None, 
+                None, 
+                Some(enum_monitors_collect), 
+                LPARAM(&mut inner.monitor_cache as *mut _ as isize)
+            );
+            if !enum_res.as_bool() {
+                warn!("EnumDisplayMonitors failed");
+            }
         }
+
+        debug!("Enumerated {} monitors", inner.monitor_cache.len());
+        trace!("Monitors: {:?}", inner.monitor_cache);
+    } else {
+        debug!("Using cached monitor information ({} monitors)", inner.monitor_cache.len());
     }
 
-    debug!("Enumerated {} monitors", monitors.len());
-    trace!("Monitors: {:?}", monitors);
-
+    // Calculate total area
     let mut total_area: i64 = 0;
-    for mon in &monitors {
+    for mon in &inner.monitor_cache {
         total_area += mon.total_area;
     }
     debug!("Total desktop area: {}", total_area);
 
-    let mut windows: Vec<(RECT, String, String)> = Vec::new();
-    unsafe {
-        let enum_res = EnumWindows(Some(enum_windows_collect), LPARAM(&mut windows as *mut _ as isize));
-        if enum_res.is_err() {
-            warn!("EnumWindows failed");
+    // If we have changed windows or empty cache, we need to update window information
+    let need_full_window_update = inner.window_cache.is_empty() || !inner.changed_windows.is_empty();
+
+    // Clear and reuse the windows buffer
+    inner.windows_buffer.clear();
+
+    if need_full_window_update {
+        // Enumerate all windows
+        unsafe {
+            let enum_res = EnumWindows(
+                Some(enum_windows_collect), 
+                LPARAM(&mut inner.windows_buffer as *mut _ as isize)
+            );
+            if enum_res.is_err() {
+                warn!("EnumWindows failed");
+            }
+        }
+
+        // Update the window cache with the new information
+        let now = Instant::now();
+        inner.window_cache.clear();
+        for (rect, class_name, process_name) in &inner.windows_buffer {
+            let hwnd_val = rect as *const RECT as isize; // Use pointer as unique ID
+            let is_shell = class_name.starts_with("Shell_");
+            let window_info = types::WindowInfo {
+                rect: *rect,
+                class_name: class_name.clone(),
+                process_name: process_name.clone(),
+                is_shell,
+                last_updated: now,
+            };
+            inner.window_cache.insert(hwnd_val, window_info);
+        }
+
+        debug!("Updated window cache, now contains {} windows", inner.window_cache.len());
+    } else {
+        debug!("Using cached window information ({} windows)", inner.window_cache.len());
+
+        // Convert cached windows to the format needed for region calculations
+        for window_info in inner.window_cache.values() {
+            inner.windows_buffer.push((
+                window_info.rect,
+                window_info.class_name.clone(),
+                window_info.process_name.clone()
+            ));
         }
     }
 
-    debug!("Enumerated {} windows", windows.len());
-
-    let mut per_monitor_stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(monitors.len());
+    // Calculate visible area for each monitor
+    let mut per_monitor_stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(inner.monitor_cache.len());
     let mut total_visible: i64 = 0;
-    for mon in monitors {
+
+    for mon in &inner.monitor_cache {
         let current_rgn = unsafe { CreateRectRgnIndirect(&mon.rect) };
         if current_rgn.is_invalid() {
             warn!("Failed to create current_rgn for monitor {}", mon.handle);
@@ -411,7 +513,7 @@ fn calculate_visible_desktop_area() -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
             continue;
         }
 
-        for (win_rect, class_name, _process_name) in &windows {
+        for (win_rect, class_name, _process_name) in &inner.windows_buffer {
             let mut intersect_rect = RECT::default();
             let intersects = unsafe { IntersectRect(&mut intersect_rect, win_rect, &mon.rect).as_bool() };
             if intersects {
@@ -441,9 +543,14 @@ fn calculate_visible_desktop_area() -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
             }
         }
 
-        let current_visible = compute_region_area(current_rgn);
-        let max_visible = compute_region_area(max_rgn);
-        debug!("Monitor {}: current_visible={}, max_visible={}, total_area={}", mon.handle, current_visible, max_visible, mon.total_area);
+        // Reuse the region buffer if possible
+        inner.region_buffer.clear();
+        let current_visible = compute_region_area_optimized(current_rgn, &mut inner.region_buffer);
+        let max_visible = compute_region_area_optimized(max_rgn, &mut inner.region_buffer);
+
+        debug!("Monitor {}: current_visible={}, max_visible={}, total_area={}", 
+               mon.handle, current_visible, max_visible, mon.total_area);
+
         total_visible += current_visible;
         per_monitor_stats.push((mon.handle, current_visible, max_visible, mon.total_area));
 
@@ -456,13 +563,18 @@ fn calculate_visible_desktop_area() -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
     (per_monitor_stats, total_visible, total_area)
 }
 
-fn compute_region_area(rgn: HRGN) -> i64 {
+fn compute_region_area_optimized(rgn: HRGN, buffer: &mut Vec<u8>) -> i64 {
     let buffer_size = unsafe { GetRegionData(rgn, 0, None) };
     if buffer_size == 0 {
         debug!("GetRegionData returned 0 size");
         return 0;
     }
-    let mut buffer: Vec<u8> = vec![0; buffer_size as usize];
+
+    // Resize the buffer if needed
+    if buffer.len() < buffer_size as usize {
+        buffer.resize(buffer_size as usize, 0);
+    }
+
     let data_size = unsafe {
         GetRegionData(rgn, buffer_size, Some(buffer.as_mut_ptr() as *mut RGNDATA))
     };
@@ -470,6 +582,7 @@ fn compute_region_area(rgn: HRGN) -> i64 {
         warn!("Failed to get region data");
         return 0;
     }
+
     let rgn_data = unsafe { &*(buffer.as_ptr() as *const RGNDATA) };
     let mut area: i64 = 0;
     let rects_ptr = rgn_data.Buffer.as_ptr() as *const RECT;
@@ -493,21 +606,34 @@ extern "system" fn enum_monitors_collect(hmonitor: HMONITOR, _hdc: HDC, lprc_mon
 }
 
 extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // Quick initial checks to filter out windows early
     let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
     let is_iconic = unsafe { IsIconic(hwnd).as_bool() };
-    trace!("Checking window {:?}: visible={}, iconic={}", hwnd, is_visible, is_iconic);
+
     if !is_visible || is_iconic {
+        trace!("Skipping non-visible or iconic window {:?}", hwnd);
         return TRUE;
     }
 
+    // Get window style early to filter out transparent windows
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 };
+    if (ex_style & WS_EX_TRANSPARENT.0) != 0 {
+        trace!("Skipping transparent window {:?}", hwnd);
+        return TRUE;
+    }
+
+    // Batch DWM attribute queries by preparing a struct to hold all attributes
     let mut rect = RECT::default();
     let mut extended_rect = RECT::default();
+    let mut cloaked: u32 = 0;
+    let mut iconic: BOOL = BOOL(0);
+
+    // Get extended frame bounds
     let hr = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut extended_rect as *mut _ as *mut _, mem::size_of::<RECT>() as u32) };
     if hr.is_ok() {
         rect = extended_rect;
-        trace!("Used extended frame bounds: {:?}", rect);
     } else {
-        warn!("DwmGetWindowAttribute for extended bounds failed: {:?}", hr);
+        // Fallback to regular window rect
         unsafe {
             let get_res = GetWindowRect(hwnd, &mut rect);
             if get_res.is_err() {
@@ -517,65 +643,49 @@ extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
         }
     }
 
-    let mut cloaked: u32 = 0;
+    // Check if window is cloaked
     let hr_cloaked = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, mem::size_of::<u32>() as u32) };
-    if hr_cloaked.is_ok() {
-        trace!("Cloaked attribute: {}", cloaked);
-        if cloaked > 0 {
-            return TRUE;
-        }
-    } else {
-        warn!("DwmGetWindowAttribute for cloaked failed: {:?}", hr_cloaked);
+    if hr_cloaked.is_ok() && cloaked > 0 {
+        trace!("Skipping cloaked window {:?}", hwnd);
+        return TRUE;
     }
 
-    let mut iconic: BOOL = BOOL(0);
+    // Check if window has iconic bitmap
     let hr_iconic = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &mut iconic as *mut _ as *mut _, mem::size_of::<BOOL>() as u32) };
-    if hr_iconic.is_ok() {
-        trace!("Iconic bitmap attribute: {}", iconic.as_bool());
-        if iconic.as_bool() {
-            return TRUE;
-        }
-    } else {
-        warn!("DwmGetWindowAttribute for iconic bitmap failed: {:?}", hr_iconic);
+    if hr_iconic.is_ok() && iconic.as_bool() {
+        trace!("Skipping window with iconic bitmap {:?}", hwnd);
+        return TRUE;
     }
 
+    // Get class name
     let mut class_buf = [0u16; 256];
     let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
     let class_name = String::from_utf16_lossy(&class_buf[0..class_len as usize]).to_string();
-    trace!("Class name: {}", class_name);
 
+    // Skip desktop window
     if class_name == "Progman" {
         trace!("Skipping Progman window");
         return TRUE;
     }
 
-    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 };
-    trace!("Extended style: {}", ex_style);
-    if (ex_style & WS_EX_TRANSPARENT.0) != 0 {
-        trace!("Skipping transparent ex_style window");
-        return TRUE;
-    }
-
+    // Check layered window attributes
     if (ex_style & WS_EX_LAYERED.0) != 0 {
         let mut alpha: u8 = 0;
         let mut flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
         let layered_res = unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) };
-        if layered_res.is_ok() {
-            trace!("Layered window: alpha={}, flags={}", alpha, flags.0);
-            if alpha < 255 || (flags.0 & LWA_COLORKEY.0) != 0 {
-                return TRUE;
-            }
-        } else {
-            warn!("GetLayeredWindowAttributes failed: {:?}", layered_res);
+        if layered_res.is_ok() && (alpha < 255 || (flags.0 & LWA_COLORKEY.0) != 0) {
+            trace!("Skipping transparent layered window {:?}", hwnd);
+            return TRUE;
         }
     }
 
+    // Get process name (only if we've passed all other filters)
+    let mut process_name = String::new();
     let mut pid: u32 = 0;
     unsafe {
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
     }
-    trace!("PID: {}", pid);
-    let mut process_name = String::new();
+
     if pid != 0 {
         let hproc = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) };
         if let Ok(hproc) = hproc {
@@ -583,18 +693,14 @@ extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let len = unsafe { GetModuleBaseNameW(hproc, None, &mut buf) };
             process_name = String::from_utf16_lossy(&buf[0..len as usize]).to_string();
             unsafe {
-                let close_res = CloseHandle(hproc);
-                if close_res.is_err() {
-                    trace!("Failed to close process handle");
-                }
+                let _ = CloseHandle(hproc);
             }
-        } else {
-            warn!("Failed to open process for PID {}", pid);
         }
     }
 
     trace!("Adding window: rect={:?}, class={}, process={}", rect, class_name, process_name);
 
+    // Add window to the collection
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<(RECT, String, String)>) };
     windows.push((rect, class_name, process_name));
 

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar};
 // types.rs
 use std::thread::JoinHandle;
@@ -22,6 +23,15 @@ pub struct MonitorInfo {
     pub(crate) total_area: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub(crate) rect: RECT,
+    pub(crate) class_name: String,
+    pub(crate) process_name: String,
+    pub(crate) is_shell: bool,
+    pub(crate) last_updated: Instant,
+}
+
 pub type Callback = Box<dyn Fn(&[MonitorVisibleInfo], i64, i64, *mut std::ffi::c_void) + Send + 'static>;
 
 pub struct Inner {
@@ -34,6 +44,15 @@ pub struct Inner {
     pub(crate) pending_timer: bool,
     pub(crate) throttle_duration: Duration,
     pub(crate) cancel_timer: Option<Arc<Condvar>>,
+    // Cache for windows to avoid re-querying information
+    pub(crate) window_cache: HashMap<isize, WindowInfo>,
+    // Set of windows that have changed since last computation
+    pub(crate) changed_windows: HashSet<isize>,
+    // Cached monitor information
+    pub(crate) monitor_cache: Vec<MonitorInfo>,
+    // Reusable buffers to reduce allocations
+    pub(crate) windows_buffer: Vec<(RECT, String, String)>,
+    pub(crate) region_buffer: Vec<u8>,
 }
 
 #[repr(transparent)]
