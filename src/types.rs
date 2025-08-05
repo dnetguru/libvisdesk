@@ -1,3 +1,4 @@
+use std::sync::{Arc, Condvar};
 // types.rs
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -5,6 +6,7 @@ use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct MonitorVisibleInfo {
     pub monitor_id: i64,
     pub current_visible: i64,
@@ -13,6 +15,7 @@ pub struct MonitorVisibleInfo {
 }
 
 #[derive(Copy, Clone)]
+#[derive(Debug)]
 pub struct MonitorInfo {
     pub(crate) handle: i64,
     pub(crate) rect: RECT,
@@ -30,6 +33,7 @@ pub struct Inner {
     pub(crate) last_computation: Option<Instant>,
     pub(crate) pending_timer: bool,
     pub(crate) throttle_duration: Duration,
+    pub(crate) cancel_timer: Option<Arc<Condvar>>,
 }
 
 #[repr(transparent)]
