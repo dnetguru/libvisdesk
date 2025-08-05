@@ -90,7 +90,27 @@ impl LibVisInstance {
 
     pub fn get_visible_area(&self) -> (Vec<MonitorVisibleInfo>, i64, i64) {
         debug!("Starting visible area calculation");
-        let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area();
+
+        // Create temporary Inner struct
+        let mut temp_inner = Inner {
+            hook: None,
+            thread: None,
+            thread_id: None,
+            callback: None,
+            user_data: SendablePtr(ptr::null_mut()),
+            last_computation: None,
+            pending_timer: false,
+            throttle_duration: Duration::from_millis(500),
+            cancel_timer: None,
+            window_cache: HashMap::new(),
+            changed_windows: HashSet::new(),
+            monitor_cache: Vec::new(),
+            windows_buffer: Vec::with_capacity(100),
+            region_buffer: Vec::with_capacity(4096),
+        };
+
+        // Call the function with the temporary inner struct
+        let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area(&mut temp_inner);
 
         let monitors_vec: Vec<MonitorVisibleInfo> = per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
             monitor_id: id,
@@ -313,7 +333,7 @@ fn perform_computation(arc: &Arc<Mutex<Inner>>) {
     let mut inner = arc.lock().unwrap();
 
     // Calculate visible area with access to cached data
-    let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area_optimized(&mut inner);
+    let (per_monitor_stats, total_visible, total_area) = calculate_visible_desktop_area(&mut inner);
 
     let monitors_vec: Vec<MonitorVisibleInfo> = per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
         monitor_id: id,
@@ -392,30 +412,8 @@ extern "system" fn win_event_proc(
     }
 }
 
-// Original function kept for backward compatibility
-fn calculate_visible_desktop_area() -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
-    let mut inner = Inner {
-        hook: None,
-        thread: None,
-        thread_id: None,
-        callback: None,
-        user_data: SendablePtr(ptr::null_mut()),
-        last_computation: None,
-        pending_timer: false,
-        throttle_duration: Duration::from_millis(500),
-        cancel_timer: None,
-        window_cache: HashMap::new(),
-        changed_windows: HashSet::new(),
-        monitor_cache: Vec::new(),
-        windows_buffer: Vec::with_capacity(100),
-        region_buffer: Vec::with_capacity(4096),
-    };
 
-    calculate_visible_desktop_area_optimized(&mut inner)
-}
-
-// Optimized version that uses cached data
-fn calculate_visible_desktop_area_optimized(inner: &mut Inner) -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
+fn calculate_visible_desktop_area(inner: &mut Inner) -> (Vec<(i64, i64, i64, i64)>, i64, i64) {
     // Check if we need to update monitor information
     let need_monitor_update = inner.monitor_cache.is_empty();
 
@@ -545,8 +543,8 @@ fn calculate_visible_desktop_area_optimized(inner: &mut Inner) -> (Vec<(i64, i64
 
         // Reuse the region buffer if possible
         inner.region_buffer.clear();
-        let current_visible = compute_region_area_optimized(current_rgn, &mut inner.region_buffer);
-        let max_visible = compute_region_area_optimized(max_rgn, &mut inner.region_buffer);
+        let current_visible = compute_region_area(current_rgn, &mut inner.region_buffer);
+        let max_visible = compute_region_area(max_rgn, &mut inner.region_buffer);
 
         debug!("Monitor {}: current_visible={}, max_visible={}, total_area={}", 
                mon.handle, current_visible, max_visible, mon.total_area);
@@ -563,7 +561,7 @@ fn calculate_visible_desktop_area_optimized(inner: &mut Inner) -> (Vec<(i64, i64
     (per_monitor_stats, total_visible, total_area)
 }
 
-fn compute_region_area_optimized(rgn: HRGN, buffer: &mut Vec<u8>) -> i64 {
+fn compute_region_area(rgn: HRGN, buffer: &mut Vec<u8>) -> i64 {
     let buffer_size = unsafe { GetRegionData(rgn, 0, None) };
     if buffer_size == 0 {
         debug!("GetRegionData returned 0 size");
