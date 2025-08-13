@@ -30,7 +30,7 @@ pub(crate) extern "system" fn win_event_proc(
     _id_event_thread: u32,
     _dwms_event_time: u32,
 ) {
-    let is_window = unsafe { IsWindow(hwnd).as_bool() };
+    let is_window = unsafe { IsWindow(Some(hwnd)).as_bool() };
     let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
     let parent = unsafe { GetParent(hwnd).unwrap_or_default() };
     let parent_invalid = parent.is_invalid();

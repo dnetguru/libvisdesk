@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ptr;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle as TokioJoinHandle;
 use windows::Win32::Foundation::RECT;
 
-use crate::win::SendableWinEventHook;
+use crate::win_callbacks::SendableWinEventHook;
 
 /// Messages that can be sent through the tokio channel
 #[derive(Debug)]
@@ -47,7 +48,7 @@ pub struct ThreadLocalState {
     pub(crate) message_sender: Option<Sender<VisibilityMessage>>,
     // Main tokio task handle
     pub(crate) main_task_handle: Option<TokioJoinHandle<()>>,
-    // Set of windows that have changed since last computation
+    // Set of windows that have changed since the last computation
     pub(crate) changed_windows: HashSet<isize>,
     // Reusable buffers to reduce allocations
     pub(crate) windows_buffer: Vec<(RECT, String, String)>,
@@ -59,3 +60,25 @@ pub struct SendablePtr(pub *mut std::ffi::c_void);
 
 unsafe impl Send for SendablePtr {}
 unsafe impl Sync for SendablePtr {}
+
+impl Default for ThreadLocalState {
+    fn default() -> Self {
+        Self {
+            hook: None,
+            thread: None,
+            thread_id: None,
+            callback: None,
+            user_data: SendablePtr(ptr::null_mut()),
+            last_computation: None,
+            pending_timer: false,
+            throttle_duration: Duration::from_millis(500),
+            tokio_timer_handle: None,
+            tokio_runtime: None,
+            message_sender: None,
+            main_task_handle: None,
+            changed_windows: Default::default(),
+            windows_buffer: Vec::with_capacity(100), // Pre-allocate for ~100 windows
+            region_buffer: Vec::with_capacity(4096), // Pre-allocate 4KB for region data
+        }
+    }
+}

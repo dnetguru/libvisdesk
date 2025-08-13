@@ -7,16 +7,17 @@ use log::{debug, trace, warn};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-
+use crate::MonitorVisibleInfo;
 use crate::types::ThreadLocalState;
 use crate::visibility::compute_region_area;
-use crate::win::{enum_monitors_collect, enum_windows_collect, MonitorInfo};
+use crate::win_callbacks::windows::enum_windows_collect_cb;
+use crate::win_callbacks::monitors::{enum_monitors_collect_cb, MonitorInfo};
 
 /// Result of the visible desktop area calculation.
 #[derive(Debug)]
 pub(crate) struct VisibleDesktopAreaResult {
     /// Statistics for each monitor: (monitor_id, current_visible, max_visible, total_area)
-    pub per_monitor_stats: Vec<(i64, i64, i64, i64)>,
+    pub per_monitor_stats: Vec<MonitorVisibleInfo>,
     /// Total visible area across all monitors
     pub total_visible: i64,
     /// Total area across all monitors
@@ -35,9 +36,9 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
 
     unsafe {
         let enum_res = EnumDisplayMonitors(
-            None, 
-            None, 
-            Some(enum_monitors_collect), 
+            None,
+            None,
+            Some(enum_monitors_collect_cb),
             LPARAM(&mut monitors_vec as *mut _ as isize)
         );
         if !enum_res.as_bool() {
@@ -61,7 +62,7 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
     // TODO: Cache windows
     unsafe {
         let enum_res = EnumWindows(
-            Some(enum_windows_collect), 
+            Some(enum_windows_collect_cb),
             LPARAM(&mut state.windows_buffer as *mut _ as isize)
         );
         if enum_res.is_err() {
@@ -71,8 +72,8 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
 
     debug!("Enumerated {} windows", state.windows_buffer.len());
 
-    // Calculate visible area for each monitor
-    let mut per_monitor_stats: Vec<(i64, i64, i64, i64)> = Vec::with_capacity(monitors_vec.len());
+    // Calculate the visible area for each monitor
+    let mut per_monitor_stats: Vec<MonitorVisibleInfo> = Vec::with_capacity(monitors_vec.len());
     let mut total_visible: i64 = 0;
 
     for monitor in &monitors_vec {
@@ -84,7 +85,7 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
         let max_rgn = unsafe { CreateRectRgnIndirect(&monitor.rect) };
         if max_rgn.is_invalid() {
             warn!("Failed to create max_rgn for monitor {}", monitor.handle);
-            unsafe { let _ = DeleteObject(current_rgn); }
+            unsafe { let _ = DeleteObject(HGDIOBJ::from(current_rgn)); }
             continue;
         }
 
@@ -100,17 +101,17 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
                 }
 
                 unsafe {
-                    CombineRgn(current_rgn, current_rgn, win_rgn, RGN_DIFF);
+                    CombineRgn(Some(current_rgn), Some(current_rgn), Some(win_rgn), RGN_DIFF);
                 }
 
                 if class_name.starts_with("Shell_") {
                     unsafe {
-                        CombineRgn(max_rgn, max_rgn, win_rgn, RGN_DIFF);
+                        CombineRgn(Option::from(max_rgn), Some(max_rgn), Some(win_rgn), RGN_DIFF);
                     }
                 }
 
                 unsafe {
-                    let delete_res = DeleteObject(win_rgn);
+                    let delete_res = DeleteObject(HGDIOBJ::from(win_rgn));
                     if !delete_res.as_bool() {
                         trace!("Failed to delete win_rgn");
                     }
@@ -127,11 +128,16 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
                monitor.handle, current_visible, max_visible, monitor.total_area);
 
         total_visible += current_visible;
-        per_monitor_stats.push((monitor.handle, current_visible, max_visible, monitor.total_area));
+        per_monitor_stats.push(MonitorVisibleInfo {
+            monitor_id: monitor.handle,
+            current_visible,
+            max_visible,
+            total_area: monitor.total_area
+        });
 
         unsafe {
-            let _ = DeleteObject(current_rgn);
-            let _ = DeleteObject(max_rgn);
+            let _ = DeleteObject(HGDIOBJ::from(current_rgn));
+            let _ = DeleteObject(HGDIOBJ::from(max_rgn));
         }
     }
 

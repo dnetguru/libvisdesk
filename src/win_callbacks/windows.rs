@@ -1,22 +1,16 @@
-//! Windows window enumeration and property functionality.
-//!
-//! This module contains functions for enumerating windows and retrieving
-//! their properties, such as position, size, and class name.
-
 use log::{trace, warn};
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::*;
-use windows::Win32::System::ProcessStatus::*;
-use windows::Win32::System::Threading::*;
-use windows::Win32::UI::WindowsAndMessaging::*;
-
-use std::mem;
+use windows::core::BOOL;
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_COLORKEY, WS_EX_LAYERED, WS_EX_TRANSPARENT};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_HAS_ICONIC_BITMAP};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
 
 /// Windows enumeration callback.
 ///
 /// This function is called by Windows for each top-level window during enumeration.
 /// It collects information about visible windows for visibility calculations.
-pub(crate) extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+pub(crate) extern "system" fn enum_windows_collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // Quick initial checks to filter out windows early
     let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
     let is_iconic = unsafe { IsIconic(hwnd).as_bool() };
@@ -40,7 +34,7 @@ pub(crate) extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -
     let mut iconic: BOOL = BOOL(0);
 
     // Get extended frame bounds
-    let hr = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut extended_rect as *mut _ as *mut _, mem::size_of::<RECT>() as u32) };
+    let hr = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut extended_rect as *mut _ as *mut _, size_of::<RECT>() as u32) };
     if hr.is_ok() {
         rect = extended_rect;
     } else {
@@ -54,15 +48,15 @@ pub(crate) extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -
         }
     }
 
-    // Check if window is cloaked
-    let hr_cloaked = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, mem::size_of::<u32>() as u32) };
+    // Check if the window is cloaked
+    let hr_cloaked = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, size_of::<u32>() as u32) };
     if hr_cloaked.is_ok() && cloaked > 0 {
         trace!("Skipping cloaked window {:?}", hwnd);
         return TRUE;
     }
 
-    // Check if window has iconic bitmap
-    let hr_iconic = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &mut iconic as *mut _ as *mut _, mem::size_of::<BOOL>() as u32) };
+    // Check if `has_iconic_bitmap` is set on the window
+    let hr_iconic = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &mut iconic as *mut _ as *mut _, size_of::<BOOL>() as u32) };
     if hr_iconic.is_ok() && iconic.as_bool() {
         trace!("Skipping window with iconic bitmap {:?}", hwnd);
         return TRUE;
@@ -90,7 +84,7 @@ pub(crate) extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -
         }
     }
 
-    // Get process name (only if we've passed all other filters)
+    // Get the process name (only if we've passed all other filters)
     let mut process_name = String::new();
     let mut pid: u32 = 0;
     unsafe {
@@ -111,7 +105,7 @@ pub(crate) extern "system" fn enum_windows_collect(hwnd: HWND, lparam: LPARAM) -
 
     trace!("Adding window: rect={:?}, class={}, process={}", rect, class_name, process_name);
 
-    // Add window to the collection
+    // Add the window to the collection
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<(RECT, String, String)>) };
     windows.push((rect, class_name, process_name));
 

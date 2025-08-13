@@ -4,11 +4,8 @@
 //! including event handling, window enumeration, and monitor information.
 
 mod events;
-mod window;
-mod monitor;
+pub(crate) mod windows;
+pub(crate) mod monitors;
 
-pub(crate) use events::win_event_proc;
 pub use events::SendableWinEventHook;
-pub(crate) use window::enum_windows_collect;
-pub(crate) use monitor::enum_monitors_collect;
-pub use monitor::MonitorInfo;
+pub(crate) use events::win_event_proc;

@@ -8,7 +8,7 @@
 mod types;
 mod ffi;
 mod instance;
-mod win;
+mod win_callbacks;
 mod visibility;
 
 // Re-export public API

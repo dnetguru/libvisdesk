@@ -28,7 +28,7 @@ use windows::Win32::System::Threading::*;
 
 use crate::types::{Callback, ThreadLocalState, MonitorVisibleInfo, SendablePtr};
 use crate::visibility::calculate_visible_desktop_area;
-use crate::win::{win_event_proc, SendableWinEventHook};
+use crate::win_callbacks::{win_event_proc, SendableWinEventHook};
 
 pub struct LibVisInstance(Arc<Mutex<ThreadLocalState>>);
 
@@ -48,23 +48,22 @@ impl LibVisInstance {
     }
 
     pub fn new() -> Self {
-        let mut builder = Builder::new();
-        builder.filter_level(LevelFilter::Error);
+        let mut log_builder = Builder::new();
+        log_builder.filter_level(LevelFilter::Error);
 
-        let env_var = "LIBVISDESK_LOG_LEVEL";
-        if let Ok(level_str) = env::var(env_var) {
-            builder.parse_filters(&level_str);
+        if let Ok(level_str) = env::var("LIBVISDESK_LOG_LEVEL") {
+            log_builder.parse_filters(&level_str);
         }
 
         if let Ok(path) = env::var("LIBVISDESK_LOG_FILE") {
             if let Ok(file) = File::create(&path) {
-                builder.target(Target::Pipe(Box::new(file)));
+                log_builder.target(Target::Pipe(Box::new(file)));
             } else {
                 eprintln!("Failed to create log file: {}", path);
             }
         }
 
-        builder.init();
+        log_builder.init();
 
         unsafe {
             let res = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -73,27 +72,9 @@ impl LibVisInstance {
             }
         }
 
-        let state = ThreadLocalState {
-            hook: None,
-            thread: None,
-            thread_id: None,
-            callback: None,
-            user_data: SendablePtr(ptr::null_mut()),
-            last_computation: None,
-            pending_timer: false,
-            throttle_duration: Duration::from_millis(500),
-            tokio_timer_handle: None,
-            tokio_runtime: None,
-            message_sender: None,
-            main_task_handle: None,
-            changed_windows: Default::default(),
-            windows_buffer: Vec::with_capacity(100), // Pre-allocate for ~100 windows
-            region_buffer: Vec::with_capacity(4096), // Pre-allocate 4KB for region data
-        };
-
         info!("Created new LibVisInstance");
 
-        Self(Arc::new(Mutex::new(state)))
+        Self(Arc::new(Mutex::new(ThreadLocalState::default())))
     }
 
     pub fn deinit(&mut self) {
@@ -103,37 +84,14 @@ impl LibVisInstance {
     pub fn get_visible_area(&self) -> (Vec<MonitorVisibleInfo>, i64, i64) {
         debug!("Starting visible area calculation");
 
-        // Create temporary state struct
-        let mut temp_state = ThreadLocalState {
-            hook: None,
-            thread: None,
-            thread_id: None,
-            callback: None,
-            user_data: SendablePtr(ptr::null_mut()),
-            last_computation: None,
-            pending_timer: false,
-            throttle_duration: Duration::from_millis(500),
-            tokio_timer_handle: None,
-            tokio_runtime: None,
-            message_sender: None,
-            main_task_handle: None,
-            changed_windows: Default::default(),
-            windows_buffer: Vec::with_capacity(100),
-            region_buffer: Vec::with_capacity(4096),
-        };
+        // Create a temporary state struct
+        let mut temp_state = ThreadLocalState::default();
 
         let result = calculate_visible_desktop_area(&mut temp_state);
 
-        let monitors_vec: Vec<MonitorVisibleInfo> = result.per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
-            monitor_id: id,
-            current_visible: cur,
-            max_visible: maxv,
-            total_area: tot,
-        }).collect();
-
         debug!("Visible area calculation complete. Total visible: {}, Total area: {}", result.total_visible, result.total_area);
 
-        (monitors_vec, result.total_visible, result.total_area)
+        (result.per_monitor_stats, result.total_visible, result.total_area)
     }
 
     pub fn watch_visible_area(
@@ -255,7 +213,7 @@ impl LibVisInstance {
                     }
                 }
 
-                // Send shutdown message to the tokio task
+                // Send a shutdown message to the tokio task
                 if let Some(sender) = &state.message_sender && let Err(e) = sender.try_send(VisibilityMessage::Shutdown) {
                     warn!("Failed to send Shutdown message: {:?}", e);
                 }
@@ -314,6 +272,31 @@ impl LibVisInstance {
         arc: &Arc<Mutex<ThreadLocalState>>,
         next_computation_time: &mut Option<Instant>
     ) {
+
+        // Callback to do the actual computation
+        async fn perform_computation(arc: &Arc<Mutex<ThreadLocalState>>) {
+            debug!("Performing visible area computation asynchronously");
+
+            // Get a mutable reference to the state
+            let mut state = arc.lock().unwrap();
+
+            // Calculate visible area with access to cached data
+            let result = calculate_visible_desktop_area(&mut state);
+
+            debug!("Computation results: {:?}", result.per_monitor_stats);
+            debug!("Total visible: {}, Total area: {}", result.total_visible, result.total_area);
+
+            // Clear the changed windows set since we've processed them
+            state.changed_windows.clear();
+
+            if let Some(cb) = &state.callback {
+                trace!("Calling user callback");
+                cb(&result.per_monitor_stats[..], result.total_visible, result.total_area, state.user_data.0);
+            } else {
+                warn!("No callback set for computation");
+            }
+        }
+
         let now = Instant::now();
 
         // Check if a computation is already pending or if we're within the throttle period
@@ -323,7 +306,7 @@ impl LibVisInstance {
             // If a timer is already pending, don't do anything
             if state.pending_timer {
                 (false, false, state.throttle_duration)
-            } else if next_computation_time.is_none() || next_computation_time.map_or(false, |time| now >= time) {
+            } else if next_computation_time.is_none() || next_computation_time.is_some_and(|time| now >= time) {
                 // No computation has happened yet, or we're past the throttle time
                 // Perform computation immediately
                 (true, false, state.throttle_duration)
@@ -335,7 +318,7 @@ impl LibVisInstance {
 
         if should_compute_now {
             // Perform computation immediately
-            perform_computation_async(arc).await;
+            perform_computation(arc).await;
 
             // Update next allowed computation time
             *next_computation_time = Some(now + throttle_duration);
@@ -358,7 +341,7 @@ impl LibVisInstance {
             // Spawn a task that will wait and then perform the computation
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(wait_duration).await;
-                perform_computation_async(&arc_clone).await;
+                perform_computation(&arc_clone).await;
 
                 // Update state after computation
                 let now = Instant::now();
@@ -457,37 +440,6 @@ impl LibVisInstance {
         }
 
         true
-    }
-}
-
-// Async version of perform_computation
-async fn perform_computation_async(arc: &Arc<Mutex<ThreadLocalState>>) {
-    debug!("Performing visible area computation asynchronously");
-
-    // Get a mutable reference to the state
-    let mut state = arc.lock().unwrap();
-
-    // Calculate visible area with access to cached data
-    let result = calculate_visible_desktop_area(&mut state);
-
-    let monitors_vec: Vec<MonitorVisibleInfo> = result.per_monitor_stats.into_iter().map(|(id, cur, maxv, tot)| MonitorVisibleInfo {
-        monitor_id: id,
-        current_visible: cur,
-        max_visible: maxv,
-        total_area: tot,
-    }).collect();
-
-    debug!("Computation results: {:?}", monitors_vec);
-    debug!("Total visible: {}, Total area: {}", result.total_visible, result.total_area);
-
-    // Clear the changed windows set since we've processed them
-    state.changed_windows.clear();
-
-    if let Some(cb) = &state.callback {
-        trace!("Calling user callback");
-        cb(&monitors_vec[..], result.total_visible, result.total_area, state.user_data.0);
-    } else {
-        warn!("No callback set for computation");
     }
 }
 
