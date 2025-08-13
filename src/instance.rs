@@ -63,7 +63,7 @@ impl LibVisInstance {
             }
         }
 
-        log_builder.init();
+        let _ = log_builder.try_init();
 
         unsafe {
             let res = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
