@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::ptr;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -43,7 +42,8 @@ pub struct ThreadLocalState {
     pub(crate) throttle_duration: Duration,
     pub(crate) tokio_timer_handle: Option<TokioJoinHandle<()>>,
     // Tokio runtime for async operations
-    pub(crate) tokio_runtime: Option<Arc<Runtime>>,
+    pub(crate) tokio_runtime: Option<Runtime>,
+    pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
     // Channel for sending messages to the tokio task
     pub(crate) message_sender: Option<Sender<VisibilityMessage>>,
     // Main tokio task handle
@@ -74,6 +74,7 @@ impl Default for ThreadLocalState {
             throttle_duration: Duration::from_millis(500),
             tokio_timer_handle: None,
             tokio_runtime: None,
+            tokio_handle: None,
             message_sender: None,
             main_task_handle: None,
             changed_windows: Default::default(),

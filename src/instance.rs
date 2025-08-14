@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 
@@ -115,9 +115,17 @@ impl LibVisInstance {
             state.user_data = SendablePtr(user_data);
             state.throttle_duration = Duration::from_millis(throttle_ms);
 
-            // Create a tokio runtime for async operations
-            let runtime = Arc::new(Self::create_runtime());
-            state.tokio_runtime = Some(runtime.clone());
+            // Try to get an existing runtime handle or create a new one
+            let (runtime_opt, handle) = match Handle::try_current() {
+                Ok(h) => (None, h),
+                Err(_) => {
+                    let rt = Self::create_runtime();
+                    let runtime_handle = rt.handle().clone();
+                    (Some(rt), runtime_handle)
+                }
+            };
+            state.tokio_runtime = runtime_opt;
+            state.tokio_handle = Some(handle.clone());
 
             // Create a channel for sending messages to the tokio task
             let (tx, rx) = mpsc::channel(100); // Buffer size of 100 messages
@@ -125,7 +133,7 @@ impl LibVisInstance {
 
             // Spawn the main tokio task that will handle messages
             let thread_arc = arc.clone();
-            let main_task = runtime.spawn(async move {
+            let main_task = handle.spawn(async move {
                 Self::process_messages(thread_arc, rx).await;
             });
 
@@ -316,6 +324,12 @@ impl LibVisInstance {
             }
         };
 
+        // Get the spawn handle outside the if blocks to avoid repeated locking
+        let spawn_handle = {
+            let state = arc.lock().unwrap();
+            state.tokio_handle.clone().unwrap()
+        };
+
         if should_compute_now {
             // Perform computation immediately
             perform_computation(arc).await;
@@ -339,7 +353,7 @@ impl LibVisInstance {
             }
 
             // Spawn a task that will wait and then perform the computation
-            let handle = tokio::spawn(async move {
+            let timer_task_handle = spawn_handle.spawn(async move {
                 tokio::time::sleep(wait_duration).await;
                 perform_computation(&arc_clone).await;
 
@@ -353,7 +367,7 @@ impl LibVisInstance {
             // Store the handle in the state
             {
                 let mut state = arc.lock().unwrap();
-                state.tokio_timer_handle = Some(handle);
+                state.tokio_timer_handle = Some(timer_task_handle);
             }
         }
         // If neither should_compute_now nor should_schedule is true,
@@ -407,13 +421,14 @@ impl LibVisInstance {
                 None
             };
 
-            // Take the runtime to drop it later
+            // Take the runtime to shut it down later if we created it
             let runtime = state.tokio_runtime.take();
 
             // Clear other resources
             state.message_sender = None;
             state.callback = None;
             state.user_data = SendablePtr(ptr::null_mut());
+            state.tokio_handle = None;
 
             // Take the thread handle
             (mem::take(&mut state.thread), main_task, runtime)
@@ -433,10 +448,10 @@ impl LibVisInstance {
             }
         }
 
-        // Drop the runtime explicitly
+        // Shut down the runtime in the background if we created it
         if let Some(runtime) = runtime_opt {
-            debug!("Dropping tokio runtime");
-            drop(runtime);
+            debug!("Shutting down tokio runtime");
+            runtime.shutdown_background();
         }
 
         true
