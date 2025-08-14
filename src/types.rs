@@ -24,6 +24,7 @@ pub(crate) enum VisibilityMessage {
 #[derive(Debug, Clone)]
 pub struct MonitorVisibleInfo {
     pub monitor_id: i64,
+    pub monitor_index: i64,
     pub current_visible: i64,
     pub max_visible: i64,
     pub total_area: i64,

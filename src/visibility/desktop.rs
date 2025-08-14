@@ -11,7 +11,7 @@ use crate::MonitorVisibleInfo;
 use crate::types::ThreadLocalState;
 use crate::visibility::compute_region_area;
 use crate::win_callbacks::windows::enum_windows_collect_cb;
-use crate::win_callbacks::monitors::{enum_monitors_collect_cb, MonitorInfo};
+use crate::win_callbacks::monitors::{enum_monitors_collect_cb, monitor_index_post_process, MonitorInfo};
 
 /// Result of the visible desktop area calculation.
 #[derive(Debug)]
@@ -46,8 +46,7 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
         }
     }
 
-
-    monitors_vec.sort_unstable_by_key(|m| { (if m.rect.left == 0 && m.rect.top == 0 { 0 } else { 1 }, m.handle) });
+    monitor_index_post_process(&mut monitors_vec);
     debug!("Enumerated {} monitors", monitors_vec.len());
     trace!("Monitors: {:?}", monitors_vec);
 
@@ -81,12 +80,12 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
     for monitor in &monitors_vec {
         let current_rgn = unsafe { CreateRectRgnIndirect(&monitor.rect) };
         if current_rgn.is_invalid() {
-            warn!("Failed to create current_rgn for monitor {}", monitor.handle);
+            warn!("Failed to create current_rgn for monitor {}", monitor.index);
             continue;
         }
         let max_rgn = unsafe { CreateRectRgnIndirect(&monitor.rect) };
         if max_rgn.is_invalid() {
-            warn!("Failed to create max_rgn for monitor {}", monitor.handle);
+            warn!("Failed to create max_rgn for monitor {}", monitor.index);
             unsafe { let _ = DeleteObject(HGDIOBJ::from(current_rgn)); }
             continue;
         }
@@ -127,11 +126,12 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
         let max_visible = compute_region_area(max_rgn, &mut state.region_buffer);
 
         debug!("Monitor {}: current_visible={}, max_visible={}, total_area={}", 
-               monitor.handle, current_visible, max_visible, monitor.total_area);
+               monitor.index, current_visible, max_visible, monitor.total_area);
 
         total_visible += current_visible;
         per_monitor_stats.push(MonitorVisibleInfo {
-            monitor_id: monitor.handle,
+            monitor_id: monitor.id,
+            monitor_index: monitor.index,
             current_visible,
             max_visible,
             total_area: monitor.total_area
