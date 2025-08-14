@@ -46,7 +46,8 @@ pub(crate) fn calculate_visible_desktop_area(state: &mut ThreadLocalState) -> Vi
         }
     }
 
-    monitors_vec.sort_unstable_by_key(|m| m.handle);
+
+    monitors_vec.sort_unstable_by_key(|m| { (if m.rect.left == 0 && m.rect.top == 0 { 0 } else { 1 }, m.handle) });
     debug!("Enumerated {} monitors", monitors_vec.len());
     trace!("Monitors: {:?}", monitors_vec);
 
