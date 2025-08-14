@@ -32,13 +32,13 @@ This generates `libvisdesk.h` with struct definitions and function declarations.
 
 ### Rust Native
 Add to `Cargo.toml`: 
-```
+```toml
 [dependencies]
 libvisdesk = { path = "/path/to/libvisdesk" }
 ```
 
 Example (see `./examples/basic.rs` for full code):
-```
+```rust
 use libvisdesk::{LibVisInstance, MonitorVisibleInfo};
 
 fn main() {
@@ -68,7 +68,7 @@ Build and run: `cargo run --example basic`
 Link against `libvisdesk.dll.lib` and include `libvisdesk.h`. Copy `libvisdesk.dll` to your executable's directory.
 
 Example (see `./examples/msvcpp/main.cpp` for full code):
-```
+```cpp
 #include "libvisdesk.h"
 #include <iostream>
 
@@ -102,3 +102,10 @@ int main() {
 ```
 
 Build in Visual Studio: Create a console app, add header/lib paths in project properties, link the .lib, and build.
+
+### Cross compilation on Linux
+```shell
+rustup target add x86_64-pc-windows-gnu
+sudo apt install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+cargo build --target x86_64-pc-windows-gnu
+```
