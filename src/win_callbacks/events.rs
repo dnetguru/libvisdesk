@@ -3,7 +3,7 @@
 //! This module contains the event procedure for handling Windows events
 //! related to window creation, destruction, and movement.
 
-use log::{trace, warn};
+use tracing::log::{trace, warn};
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::*;

@@ -4,22 +4,23 @@
 //! which is the main entry point for the library's functionality.
 
 use std::cell::RefCell;
-use std::env;
-use std::fs::File;
 use std::mem;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 
 use crate::types::VisibilityMessage;
 
-use env_logger::{Builder, Target};
-use log::{debug, error, info, trace, warn, LevelFilter};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 use windows::Win32::Foundation::*;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -38,32 +39,14 @@ thread_local! {
 }
 
 impl LibVisInstance {
-    // Create a tokio runtime for async operations
-    fn create_runtime() -> Runtime {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)  // Use just one worker thread
-            .enable_time()
-            .build()
-            .expect("Failed to create tokio runtime")
-    }
-
     pub fn new() -> Self {
-        let mut log_builder = Builder::new();
-        log_builder.filter_level(LevelFilter::Error);
-
-        if let Ok(level_str) = env::var("LIBVISDESK_LOG_LEVEL") {
-            log_builder.parse_filters(&level_str);
-        }
-
-        if let Ok(path) = env::var("LIBVISDESK_LOG_FILE") {
-            if let Ok(file) = File::create(&path) {
-                log_builder.target(Target::Pipe(Box::new(file)));
-            } else {
-                eprintln!("Failed to create log file: {}", path);
-            }
-        }
-
-        let _ = log_builder.try_init();
+        let _ = tracing_subscriber::registry()
+            .with(
+                EnvFilter::try_from_env("LIBVISDESK_LOG_LEVEL")
+                    .unwrap_or_else(|_| EnvFilter::try_new("info").unwrap()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .try_init();
 
         unsafe {
             let res = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -75,6 +58,28 @@ impl LibVisInstance {
         info!("Created new LibVisInstance");
 
         Self(Arc::new(Mutex::new(ThreadLocalState::default())))
+    }
+
+    fn ensure_tokio_runtime(&mut self) -> Handle {
+        let arc = self.0.clone();
+        let mut state = arc.lock().unwrap();
+        let (runtime_opt, handle) = match Handle::try_current() {
+            Ok(h) => (None, h),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)  // Use just one worker thread
+                    .enable_time()
+                    .build()
+                    .expect("Failed to create tokio runtime");
+                let runtime_handle = rt.handle().clone();
+                (Some(rt), runtime_handle)
+            }
+        };
+
+        state.tokio_runtime = runtime_opt;
+        state.tokio_handle = Some(handle.clone());
+
+        handle
     }
 
     pub fn deinit(&mut self) {
@@ -106,6 +111,9 @@ impl LibVisInstance {
         let arc = self.0.clone();
 
         {
+            // Try to get an existing runtime handle or create a new one
+            let handle = self.ensure_tokio_runtime();
+
             let mut state = arc.lock().unwrap();
             if state.thread.is_some() {
                 warn!("Watcher thread already running, cannot start new one");
@@ -114,18 +122,6 @@ impl LibVisInstance {
             state.callback = Some(callback);
             state.user_data = SendablePtr(user_data);
             state.throttle_duration = Duration::from_millis(throttle_ms);
-
-            // Try to get an existing runtime handle or create a new one
-            let (runtime_opt, handle) = match Handle::try_current() {
-                Ok(h) => (None, h),
-                Err(_) => {
-                    let rt = Self::create_runtime();
-                    let runtime_handle = rt.handle().clone();
-                    (Some(rt), runtime_handle)
-                }
-            };
-            state.tokio_runtime = runtime_opt;
-            state.tokio_handle = Some(handle.clone());
 
             // Create a channel for sending messages to the tokio task
             let (tx, rx) = mpsc::channel(100); // Buffer size of 100 messages

@@ -1,4 +1,4 @@
-use log::{trace, warn};
+use tracing::log::{trace, warn};
 use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_COLORKEY, WS_EX_LAYERED, WS_EX_TRANSPARENT};

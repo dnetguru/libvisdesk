@@ -3,7 +3,7 @@
 //! This module contains functions for manipulating Windows GDI regions,
 //! including computing the area of a region.
 
-use log::{debug, trace, warn};
+use tracing::log::{debug, trace, warn};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 

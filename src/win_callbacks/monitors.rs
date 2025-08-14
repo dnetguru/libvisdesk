@@ -1,4 +1,4 @@
-use log::trace;
+use tracing::log::trace;
 use windows::core::BOOL;
 use windows::Win32::Graphics::Gdi::{HDC, HMONITOR};
 use windows::Win32::Foundation::{LPARAM, RECT, TRUE};

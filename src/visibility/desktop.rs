@@ -3,7 +3,7 @@
 //! This module contains the main function for calculating the visible desktop area,
 //! taking into account windows and monitors.
 
-use log::{debug, trace, warn};
+use tracing::log::{debug, trace, warn};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
