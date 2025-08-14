@@ -110,6 +110,13 @@
       <AdditionalLibraryDirectories>..\..\target\debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>libvisdesk.dll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>
+      </Command>
+    </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>if exist "..\..\target\release\libvisdesk.dll" (copy /Y "..\..\target\release\libvisdesk.dll" "$(TargetDir)libvisdesk.dll" &amp;&amp; exit /b 0) else (if exist "..\..\target\debug\libvisdesk.dll" (copy /Y "..\..\target\debug\libvisdesk.dll" "$(TargetDir)libvisdesk.dll" &amp;&amp; exit /b 0) else (pushd ..\.. &amp; cargo build &amp; popd &amp; copy /Y "..\..\target\debug\libvisdesk.dll" "$(TargetDir)libvisdesk.dll"))</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
